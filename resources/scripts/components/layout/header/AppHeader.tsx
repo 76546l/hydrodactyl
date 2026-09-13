@@ -123,7 +123,7 @@ const AppHeader = ({ serverId }: AppHeaderProps) => {
                     <SlotActions actions={leftActions} />
                 </div>
                 <SlotActions actions={centerActions} />
-                <div className='flex items-center gap-1.5 sm:gap-2 h-full justify-end min-w-0 overflow-hidden'>
+                <div className='flex items-center gap-1.5 sm:gap-2 justify-end min-w-0 overflow-hidden'>
                     <SlotActions actions={rightActions} />
                     <StaticButtons serverId={serverId} />
                 </div>
@@ -139,7 +139,7 @@ const AppHeader = ({ serverId }: AppHeaderProps) => {
                 <SidebarLogo />
             </div>
             <HeaderActions />
-            <div className='flex items-center gap-1.5 sm:gap-2 h-full justify-end min-w-0 overflow-hidden flex-1'>
+            <div className='flex items-center gap-1.5 sm:gap-2 justify-end min-w-0 overflow-hidden flex-1'>
                 <SlotActions actions={rightActions} />
                 <StaticButtons serverId={serverId} />
             </div>
