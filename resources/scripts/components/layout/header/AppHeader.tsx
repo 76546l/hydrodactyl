@@ -46,11 +46,11 @@ const LogoSection = memo(() => {
     return (
         <NavLink
             to={'/'}
-            className='flex shrink-0 h-8 min-w-0 gap-3 hydrodactyl'
+            className='sidebar-logo-link flex items-center shrink-0 h-8 min-w-0 gap-3 hydrodactyl'
             aria-label={`${siteName} home page`}
         >
             <Logo className='flex h-8 w-8 shrink-0 object-contain' />
-            <span className='sidebar-logo-name truncate text-sm font-semibold leading-none tracking-wide text-cream-50'>
+            <span className='sidebar-logo-name hydrodactyl-logo content-center truncate text-sm font-semibold leading-none tracking-wide text-cream-50'>
                 {siteName}
             </span>
         </NavLink>
@@ -115,17 +115,17 @@ const AppHeader = ({ serverId }: AppHeaderProps) => {
 
     if (hasSlottedLayout) {
         return (
-            <div className='h-16 w-full py-4 px-2 sm:px-4 flex items-center'>
-                <div className='flex items-center gap-1.5 sm:gap-2 shrink-0'>
+
+            <div className='h-16 w-full py-4 pr-2 flex align-middle items-center justify-between'>
+                <div className='flex items-center gap-2'>
                     <MobileSidebarToggle />
                     <SidebarLogo />
                     <SlotActions actions={leftActions} />
                 </div>
-                <div className='flex-1 flex items-center justify-center min-w-0 px-2 sm:px-4'>
-                    <SlotActions actions={centerActions} />
-                </div>
-                <div className='flex items-center gap-1.5 sm:gap-2 shrink-0'>
+                <SlotActions actions={centerActions} />
+                <div className='flex items-center gap-1.5 sm:gap-2 h-full justify-end min-w-0 overflow-hidden'>
                     <SlotActions actions={rightActions} />
+                    <HeaderActions />
                     <StaticButtons serverId={serverId} />
                 </div>
             </div>
