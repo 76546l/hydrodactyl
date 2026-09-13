@@ -33,10 +33,6 @@ const AllocationRow = ({ allocation }: Props) => {
     const uuid = ServerContext.useStoreState((state) => state.server.data?.uuid);
     const { mutate } = getServerAllocations();
 
-    if (uuid === undefined) {
-        return;
-    }
-
     const onNotesChanged = useCallback(
         (id: number, notes: string) => {
             mutate((data) => data?.map((a) => (a.id === id ? { ...a, notes } : a)), false);
