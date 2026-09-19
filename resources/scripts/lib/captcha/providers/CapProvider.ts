@@ -93,8 +93,7 @@ export class CapProvider extends BaseCaptchaProvider {
 
     private applyTheme(widget: CapWidgetElement, theme: CaptchaRenderConfig['theme']): void {
         const light =
-            theme === 'light' ||
-            (theme !== 'dark' && window.matchMedia?.('(prefers-color-scheme: light)').matches);
+            theme === 'light' || (theme !== 'dark' && window.matchMedia?.('(prefers-color-scheme: light)').matches);
 
         if (light) {
             return;
