@@ -56,7 +56,7 @@ class DomainsController extends Controller
         try {
             // Test the DNS provider connection
             $providerClass = $this->getProviderClass($data['dns_provider']);
-            $provider = new $providerClass($data['dns_config']);
+            $provider = new $providerClass($data['dns_config'], $data['name']);
             $provider->testConnection();
 
             // Handle domain creation in a transaction
@@ -110,7 +110,7 @@ class DomainsController extends Controller
             // Test the DNS provider connection if config changed
             if ($data['dns_config'] !== $domain->dns_config || $data['dns_provider'] !== $domain->dns_provider) {
                 $providerClass = $this->getProviderClass($data['dns_provider']);
-                $provider = new $providerClass($data['dns_config']);
+                $provider = new $providerClass($data['dns_config'], $data['name']);
                 $provider->testConnection();
             }
 
@@ -185,11 +185,14 @@ class DomainsController extends Controller
         $request->validate([
             'dns_provider' => 'required|string',
             'dns_config' => 'required|array',
+            'domain_name' => 'nullable|string',
         ]);
 
         try {
             $providerClass = $this->getProviderClass($request->input('dns_provider'));
-            $provider = new $providerClass($request->input('dns_config'));
+            // Providers that address records through the domain name rather than a
+            // zone id need it here, since it is only known to the caller.
+            $provider = new $providerClass($request->input('dns_config'), $request->input('domain_name'));
             $provider->testConnection();
 
             return response()->json(['success' => true, 'message' => 'Connection successful.']);

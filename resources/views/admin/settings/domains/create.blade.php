@@ -146,6 +146,7 @@
         // Gather form data
         const formData = {
           dns_provider: $providerSelect.val(),
+          domain_name: $('#name').val(),
           dns_config: {}
         };
 
