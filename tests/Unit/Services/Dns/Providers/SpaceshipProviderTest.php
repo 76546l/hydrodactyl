@@ -80,15 +80,15 @@ class SpaceshipProviderTest extends TestCase
 
     public function testCreateRecordPutsASingleItemAndReturnsAFabricatedKey()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $key = $provider->createRecord(self::DOMAIN, 'mc', 'A', '203.0.113.10', 300);
 
         $this->assertSame('A|mc', $key);
 
-        $request = $this->sentRequest(0);
+        $request = $this->sentRequest(1);
         $this->assertSame('PUT', $request->getMethod());
-        $this->assertSame('/api/v1/dns/records/example.com', $request->getUri()->getPath());
+        $this->assertSame('https://spaceship.dev/api/v1/dns/records/example.com', (string) $request->getUri());
 
         $this->assertSame([
             'force' => true,
@@ -98,23 +98,23 @@ class SpaceshipProviderTest extends TestCase
                 'name' => 'mc',
                 'address' => '203.0.113.10',
             ]],
-        ], $this->sentBody(0));
+        ], $this->sentBody(1));
     }
 
     public function testCreateRecordSendsTheApiKeyAndSecretHeadersVerbatim()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $provider->createRecord(self::DOMAIN, 'mc', 'A', '203.0.113.10');
 
-        $request = $this->sentRequest(0);
+        $request = $this->sentRequest(1);
         $this->assertSame(self::API_KEY, $request->getHeaderLine('X-API-Key'));
         $this->assertSame(self::API_SECRET, $request->getHeaderLine('X-API-Secret'));
     }
 
     public function testCreateRecordUsesTheValueFieldForTxtRecords()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $provider->createRecord(self::DOMAIN, 'txtprobe', 'TXT', 'hello world', 120);
 
@@ -126,12 +126,12 @@ class SpaceshipProviderTest extends TestCase
                 'name' => 'txtprobe',
                 'value' => 'hello world',
             ]],
-        ], $this->sentBody(0));
+        ], $this->sentBody(1));
     }
 
     public function testCreateRecordSendsBothMxFields()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $provider->createRecord(self::DOMAIN, '@', 'MX', ['exchange' => 'mail.example.com', 'preference' => 10]);
 
@@ -144,7 +144,7 @@ class SpaceshipProviderTest extends TestCase
                 'exchange' => 'mail.example.com',
                 'preference' => 10,
             ]],
-        ], $this->sentBody(0));
+        ], $this->sentBody(1));
     }
 
     /**
@@ -153,7 +153,7 @@ class SpaceshipProviderTest extends TestCase
      */
     public function testCreateRecordLiftsTheServiceAndProtocolOutOfAnSrvName()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $key = $provider->createRecord(self::DOMAIN, '_minecraft._tcp.mc', 'SRV', [
             'service' => '_minecraft',
@@ -180,18 +180,25 @@ class SpaceshipProviderTest extends TestCase
                 'port' => 25565,
                 'target' => 'mc.example.com',
             ]],
-        ], $this->sentBody(0));
+        ], $this->sentBody(1));
     }
 
+    /**
+     * A bare label with the service and protocol in the content still has to
+     * produce the prefixed key, or two SRV records on one label would collapse
+     * onto the same key.
+     */
     public function testCreateRecordAcceptsATextualSrvContentString()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
-        $provider->createRecord(self::DOMAIN, 'mc', 'SRV', [
+        $key = $provider->createRecord(self::DOMAIN, 'mc', 'SRV', [
             'service' => 'ts3',
             'proto' => 'udp',
             'content' => 'SRV 0 5 9987 mc.example.com',
         ]);
+
+        $this->assertSame('SRV|_ts3._udp.mc', $key);
 
         $this->assertSame([
             'force' => true,
@@ -206,7 +213,7 @@ class SpaceshipProviderTest extends TestCase
                 'port' => 9987,
                 'target' => 'mc.example.com',
             ]],
-        ], $this->sentBody(0));
+        ], $this->sentBody(1));
     }
 
     public function testCreateRecordRejectsAnSrvRecordWithoutAService()
@@ -224,7 +231,10 @@ class SpaceshipProviderTest extends TestCase
      */
     public function testCreateRecordKeepsSiblingSrvRecordsDistinct()
     {
-        $provider = $this->makeProvider([new Response(204), new Response(204)]);
+        $provider = $this->makeProvider([
+            $this->recordList([]), new Response(204),
+            $this->recordList([]), new Response(204),
+        ]);
 
         $primary = $provider->createRecord(self::DOMAIN, '_ts3._udp.mc', 'SRV', [
             'service' => '_ts3',
@@ -251,11 +261,48 @@ class SpaceshipProviderTest extends TestCase
 
     public function testCreateRecordNormalizesTheApexName()
     {
-        $provider = $this->makeProvider([new Response(204)]);
+        $provider = $this->makeProvider([$this->recordList([]), new Response(204)]);
 
         $provider->createRecord(self::DOMAIN, 'example.com.', 'A', '203.0.113.10');
 
-        $this->assertSame('@', $this->sentBody(0)['items'][0]['name']);
+        $this->assertSame('@', $this->sentBody(1)['items'][0]['name']);
+    }
+
+    /**
+     * Spaceship has no per-record identifiers and appends when the value differs,
+     * so writing a second record on a name that is already taken would produce a
+     * fabricated key that can never be resolved back to one record again.
+     */
+    public function testCreateRecordRefusesToWriteWhenTheNameIsAlreadyTaken()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '198.51.100.1', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+        ]);
+
+        $this->expectException(DnsProviderException::class);
+        $this->expectExceptionMessage("a A record named 'mc' already exists");
+
+        try {
+            $provider->createRecord(self::DOMAIN, 'mc', 'A', '203.0.113.10');
+        } finally {
+            // Nothing was written: the pre-existing record was left alone.
+            $this->assertCount(1, $this->history);
+            $this->assertSame('GET', $this->sentRequest(0)->getMethod());
+        }
+    }
+
+    public function testCreateRecordIgnoresARecordOfAnotherTypeAtTheSameName()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['value' => 'token', 'name' => 'mc', 'type' => 'TXT', 'ttl' => 300],
+            ]),
+            new Response(204),
+        ]);
+
+        $this->assertSame('A|mc', $provider->createRecord(self::DOMAIN, 'mc', 'A', '203.0.113.10'));
     }
 
     public function testCreateRecordRejectsUnsupportedRecordTypes()
@@ -290,7 +337,10 @@ class SpaceshipProviderTest extends TestCase
 
         $this->assertTrue($provider->testConnection());
 
-        $this->assertSame('/api/v1/domains', $this->sentRequest(0)->getUri()->getPath());
+        $this->assertSame(
+            'https://spaceship.dev/api/v1/domains?take=1&skip=0',
+            (string) $this->sentRequest(0)->getUri()
+        );
     }
 
     public function testTestConnectionThrowsWhenTheCredentialsAreMissing()
@@ -459,10 +509,88 @@ class SpaceshipProviderTest extends TestCase
     }
 
     /**
-     * Spaceship carries the value inside the match key, so a changed value cannot
-     * replace a record in place: the old record has to go first.
+     * Two records can share a name and type: Spaceship appends rather than
+     * replacing when the value differs, and the API offers no per-record id. The
+     * provider must not pick one of them for the caller.
      */
-    public function testUpdateRecordDeletesTheExistingRecordAndWritesTheReplacement()
+    public function testGetRecordRefusesAKeyThatMatchesMoreThanOneRecord()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '198.51.100.1', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+        ]);
+
+        $this->expectException(DnsProviderException::class);
+        $this->expectExceptionMessage("Record key 'A|mc' matches 2 A records named 'mc' in zone 'example.com'");
+
+        $provider->getRecord(self::DOMAIN, 'A|mc');
+    }
+
+    /**
+     * The same ambiguity must not be resolved by deleting one of the records: the
+     * caller cannot say which of them it created.
+     */
+    public function testDeleteRecordLeavesAnAmbiguousKeyAlone()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '198.51.100.1', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+        ]);
+
+        try {
+            $provider->deleteRecord(self::DOMAIN, 'A|mc');
+            $this->fail('Expected an ambiguous key to be reported.');
+        } catch (DnsProviderException $e) {
+            $this->assertStringContainsString('no change was made', $e->getMessage());
+        }
+
+        // The listing was read, and neither record was deleted.
+        $this->assertCount(1, $this->history);
+    }
+
+    public function testUpdateRecordRefusesAKeyThatMatchesMoreThanOneRecord()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '198.51.100.1', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+        ]);
+
+        $this->expectException(DnsProviderException::class);
+        $this->expectExceptionMessage("Record key 'A|mc' matches 2 A records named 'mc'");
+
+        $provider->updateRecord(self::DOMAIN, 'A|mc', '192.0.2.1');
+    }
+
+    /**
+     * The whole-zone scan behind a fabricated key asks for the largest page the
+     * API accepts, which keeps a lookup to as few reads as possible.
+     */
+    public function testLookupsRequestTheLargestPageTheApiAccepts()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+        ]);
+
+        $provider->getRecord(self::DOMAIN, 'A|mc');
+
+        $this->assertSame(['take' => '500', 'skip' => '0'], $this->sentQuery(0));
+    }
+
+    /**
+     * Spaceship carries the value inside the match key, so a changed value cannot
+     * replace a record in place. The replacement is written first and the record
+     * it supersedes is removed afterwards, so a failure part way through leaves
+     * the zone holding the original record rather than nothing at all.
+     */
+    public function testUpdateRecordWritesTheReplacementBeforeRemovingTheSupersededRecord()
     {
         $provider = $this->makeProvider([
             $this->recordList([
@@ -474,17 +602,9 @@ class SpaceshipProviderTest extends TestCase
 
         $this->assertTrue($provider->updateRecord(self::DOMAIN, 'A|mc', '198.51.100.7', 600));
 
-        $delete = $this->sentRequest(1);
-        $this->assertSame('DELETE', $delete->getMethod());
-        $this->assertSame('/api/v1/dns/records/example.com', $delete->getUri()->getPath());
-        $this->assertSame([[
-            'type' => 'A',
-            'name' => 'mc',
-            'address' => '203.0.113.10',
-        ]], $this->sentBody(1));
-
-        $put = $this->sentRequest(2);
+        $put = $this->sentRequest(1);
         $this->assertSame('PUT', $put->getMethod());
+        $this->assertSame('https://spaceship.dev/api/v1/dns/records/example.com', (string) $put->getUri());
         $this->assertSame([
             'force' => true,
             'items' => [[
@@ -493,7 +613,93 @@ class SpaceshipProviderTest extends TestCase
                 'name' => 'mc',
                 'address' => '198.51.100.7',
             ]],
-        ], $this->sentBody(2));
+        ], $this->sentBody(1));
+
+        $delete = $this->sentRequest(2);
+        $this->assertSame('DELETE', $delete->getMethod());
+        $this->assertSame([[
+            'type' => 'A',
+            'name' => 'mc',
+            'address' => '203.0.113.10',
+        ]], $this->sentBody(2));
+    }
+
+    /**
+     * The caller's rollback path cannot restore a record that is already gone, so
+     * a failed write has to leave the original record untouched.
+     */
+    public function testUpdateRecordLeavesTheOriginalRecordAloneWhenTheWriteFails()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+            $this->jsonResponse(['detail' => 'Service unavailable'], 503),
+        ]);
+
+        try {
+            $provider->updateRecord(self::DOMAIN, 'A|mc', '198.51.100.7');
+            $this->fail('Expected the failed write to be reported.');
+        } catch (DnsProviderException $e) {
+            $this->assertStringContainsString('Service unavailable', $e->getMessage());
+        }
+
+        // Only the lookup and the failed write, and no delete of the record that
+        // is still in the zone.
+        $this->assertCount(2, $this->history);
+        $this->assertSame('PUT', $this->sentRequest(1)->getMethod());
+    }
+
+    /**
+     * If the superseded record cannot be removed, the replacement is removed
+     * again so the zone keeps exactly one record for that name and type.
+     */
+    public function testUpdateRecordUndoesTheReplacementWhenTheSupersededRecordSurvives()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+            new Response(204),
+            $this->jsonResponse(['detail' => 'Rate limit exceeded'], 429),
+            new Response(204),
+        ]);
+
+        try {
+            $provider->updateRecord(self::DOMAIN, 'A|mc', '198.51.100.7');
+            $this->fail('Expected the failed delete to be reported.');
+        } catch (DnsProviderException $e) {
+            $this->assertStringContainsString('Rate limit exceeded', $e->getMessage());
+        }
+
+        $this->assertCount(4, $this->history);
+        $this->assertSame('DELETE', $this->sentRequest(2)->getMethod());
+        $this->assertSame('DELETE', $this->sentRequest(3)->getMethod());
+        $this->assertSame([[
+            'type' => 'A',
+            'name' => 'mc',
+            'address' => '198.51.100.7',
+        ]], $this->sentBody(3));
+    }
+
+    /**
+     * An unchanged value matches the record that is already there, so it is
+     * updated in place and nothing is deleted.
+     */
+    public function testUpdateRecordWritesInPlaceWhenTheValueIsUnchanged()
+    {
+        $provider = $this->makeProvider([
+            $this->recordList([
+                ['address' => '203.0.113.10', 'name' => 'mc', 'type' => 'A', 'ttl' => 300],
+            ]),
+            new Response(204),
+        ]);
+
+        $this->assertTrue($provider->updateRecord(self::DOMAIN, 'A|mc', '203.0.113.10', 600));
+
+        $this->assertCount(2, $this->history);
+        $this->assertSame('PUT', $this->sentRequest(1)->getMethod());
+        $this->assertSame(600, $this->sentBody(1)['items'][0]['ttl']);
     }
 
     public function testUpdateRecordKeepsTheExistingTtlWhenNoneIsGiven()
@@ -508,7 +714,7 @@ class SpaceshipProviderTest extends TestCase
 
         $provider->updateRecord(self::DOMAIN, 'A|mc', '198.51.100.7');
 
-        $this->assertSame(900, $this->sentBody(2)['items'][0]['ttl']);
+        $this->assertSame(900, $this->sentBody(1)['items'][0]['ttl']);
     }
 
     /**
@@ -529,7 +735,6 @@ class SpaceshipProviderTest extends TestCase
             $this->recordList($srv()),
             $this->recordList($srv()),
             new Response(204),
-            new Response(204),
         ]);
 
         $record = $provider->getRecord(self::DOMAIN, 'SRV|_minecraft._tcp.mc');
@@ -548,7 +753,10 @@ class SpaceshipProviderTest extends TestCase
                 'port' => 25565,
                 'target' => 'mc.example.com',
             ]],
-        ], $this->sentBody(3));
+        ], $this->sentBody(2));
+
+        // The content round-tripped unchanged, so the record was updated in place.
+        $this->assertCount(3, $this->history);
     }
 
     public function testUpdateRecordThrowsWhenTheRecordNoLongerExists()

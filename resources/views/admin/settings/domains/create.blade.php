@@ -124,6 +124,7 @@
       const $configContent = $('#dns-config-content');
       const $testButton = $('#test-connection');
       const $form = $('#domain-form');
+      const existingConfig = @json(old('dns_config', []));
 
       // Handle provider selection
       $providerSelect.change(function () {
@@ -215,7 +216,7 @@
 
         Object.keys(schema).forEach(function (key) {
           const field = schema[key];
-          const oldValue = `{{ old('dns_config.${key}') }}`.replace('${key}', key);
+          const oldValue = existingConfig[key] || '';
 
           html += `
                           <div class="form-group col-md-6">

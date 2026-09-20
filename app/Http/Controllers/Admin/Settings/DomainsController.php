@@ -107,8 +107,12 @@ class DomainsController extends Controller
         $data = $request->validated();
 
         try {
-            // Test the DNS provider connection if config changed
-            if ($data['dns_config'] !== $domain->dns_config || $data['dns_provider'] !== $domain->dns_provider) {
+            // Test the DNS provider connection if config changed. The name is part
+            // of that check too: providers that address records through the domain
+            // name rather than a zone id become unreachable when it changes.
+            if ($data['name'] !== $domain->name
+                || $data['dns_config'] !== $domain->dns_config
+                || $data['dns_provider'] !== $domain->dns_provider) {
                 $providerClass = $this->getProviderClass($data['dns_provider']);
                 $provider = new $providerClass($data['dns_config'], $data['name']);
                 $provider->testConnection();

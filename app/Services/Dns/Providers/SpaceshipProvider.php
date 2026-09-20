@@ -18,15 +18,31 @@ use Pterodactyl\Exceptions\Dns\DnsProviderException;
  * name retains its "_service._protocol." prefix so that several SRV records on
  * one label stay distinguishable.
  *
- * Because the value is part of the match key, there is no way to change a
- * record's value in place; updateRecord deletes the existing record and writes
- * the replacement.
+ * A fabricated key can only be resolved back to a record while exactly one
+ * record in the zone answers to it, which shapes three behaviours:
+ *
+ *  - createRecord refuses to write when a record of that type and name is
+ *    already present, because the write would append a second one and leave the
+ *    key ambiguous for good.
+ *  - A key that matches more than one record is reported as an error rather
+ *    than resolved to whichever record the listing happens to return first.
+ *  - Because the value is part of the match key, a changed value cannot replace
+ *    a record in place. updateRecord writes the replacement first and only then
+ *    removes the record it supersedes, so a failure part way through leaves the
+ *    original record in the zone and the caller's rollback path can still work.
  */
 class SpaceshipProvider implements DnsProviderInterface
 {
     private const BASE_URI = 'https://spaceship.dev/api/v1/';
 
     private const PAGE_SIZE = 100;
+
+    /**
+     * Page size for the whole-zone scans behind the fabricated keys. The API
+     * accepts up to 500 records per request, which keeps the number of reads a
+     * record lookup costs as low as possible.
+     */
+    private const LOOKUP_PAGE_SIZE = 500;
 
     private const APEX = '@';
 
@@ -100,12 +116,26 @@ class SpaceshipProvider implements DnsProviderInterface
         $this->assertConfigured();
         $type = $this->normalizeType($type);
 
-        $keyName = $this->normalizeRecordName($domain, $name);
+        $keyName = $this->resolveKeyName($type, $this->normalizeRecordName($domain, $name), $content);
+        $payload = $this->buildRecordPayload($type, $keyName, $content, $ttl);
 
         try {
+            // A record of this type and name may already exist, either created
+            // outside the panel or left behind by an older subdomain of the same
+            // name. Writing anyway would append a second record that the
+            // fabricated key cannot tell apart from this one, so the name has to
+            // be free before the panel can claim it.
+            if ($this->findRecordsByKey($domain, $type, $keyName) !== []) {
+                throw DnsProviderException::recordCreationFailed(
+                    $domain,
+                    $name,
+                    "a {$type} record named '{$keyName}' already exists in this zone and was left untouched"
+                );
+            }
+
             $this->httpPut($this->recordsPath($domain), [
                 'force' => true,
-                'items' => [$this->buildRecordPayload($type, $keyName, $content, $ttl)],
+                'items' => [$payload],
             ]);
         } catch (GuzzleException $e) {
             throw DnsProviderException::recordCreationFailed($domain, $name, $this->parseErrorMessage($e));
@@ -132,17 +162,44 @@ class SpaceshipProvider implements DnsProviderInterface
         }
 
         $ttl ??= (int) ($existing['ttl'] ?? 300);
+        $payload = $this->buildRecordPayload($type, $keyName, $content, $ttl, $existing);
 
         try {
-            // The value is part of the match key on Spaceship, so a changed value
-            // can never replace an existing record in place. Remove the old record
-            // first, then write the replacement.
-            $this->httpDelete($this->recordsPath($domain), [$this->buildDeletePayload($existing)]);
+            if ($this->matchesExistingValue($existing, $payload)) {
+                // Same name, type and value: Spaceship updates this record in
+                // place, so there is nothing to remove first.
+                $this->httpPut($this->recordsPath($domain), [
+                    'force' => true,
+                    'items' => [$payload],
+                ]);
+
+                return true;
+            }
+
+            // A different value is appended rather than replacing the record, so
+            // the replacement is written first: if that write fails, the record
+            // being replaced is still in the zone for the caller to roll back to.
             $this->httpPut($this->recordsPath($domain), [
                 'force' => true,
-                'items' => [$this->buildRecordPayload($type, $keyName, $content, $ttl, $existing)],
+                'items' => [$payload],
             ]);
         } catch (GuzzleException $e) {
+            throw DnsProviderException::recordUpdateFailed($domain, [$recordId], $this->parseErrorMessage($e));
+        }
+
+        try {
+            $this->httpDelete($this->recordsPath($domain), [$this->buildDeletePayload($existing)]);
+        } catch (GuzzleException $e) {
+            // The superseded record outlived its replacement. Drop the
+            // replacement again so the zone keeps exactly one record for this
+            // name and type; that keeps the key resolvable and lets a later
+            // retry of the update report the same failure.
+            try {
+                $this->httpDelete($this->recordsPath($domain), [$this->buildDeletePayload($payload)]);
+            } catch (GuzzleException) {
+                // Best effort only: the update is reported as failed either way.
+            }
+
             throw DnsProviderException::recordUpdateFailed($domain, [$recordId], $this->parseErrorMessage($e));
         }
 
@@ -370,6 +427,55 @@ class SpaceshipProvider implements DnsProviderInterface
     }
 
     /**
+     * The name a fabricated key is built from.
+     *
+     * Callers may hand an SRV record either a fully prefixed name or a bare label
+     * with the service and protocol in the content. The key always carries the
+     * prefix, so the same record produces the same key whichever form arrived,
+     * and sibling SRV records on one label stay distinguishable.
+     */
+    private function resolveKeyName(string $type, string $keyName, $content): string
+    {
+        if ($type !== 'SRV') {
+            return $keyName;
+        }
+
+        [$service, $protocol, $name] = $this->splitSrvName($keyName, $content, null);
+
+        return $service . '.' . $protocol . '.' . $name;
+    }
+
+    /**
+     * Whether a record already in the zone carries the same value as the record
+     * about to be written, in which case a write updates it in place.
+     */
+    private function matchesExistingValue(array $existing, array $payload): bool
+    {
+        $type = strtoupper((string) ($payload['type'] ?? ''));
+
+        foreach (self::VALUE_FIELDS[$type] ?? [] as $field) {
+            if ($this->comparableValue($field, $existing[$field] ?? null) !== $this->comparableValue($field, $payload[$field] ?? null)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Compare values the way the API does: numeric fields by number, everything
+     * else verbatim, since Spaceship matches TXT values case-sensitively.
+     */
+    private function comparableValue(string $field, $value): string
+    {
+        if (in_array($field, ['preference', 'priority', 'weight', 'port'], true)) {
+            return (string) (int) $value;
+        }
+
+        return (string) $value;
+    }
+
+    /**
      * Map record content onto the SRV-specific fields.
      */
     private function parseSrvContent($content): array
@@ -527,14 +633,39 @@ class SpaceshipProvider implements DnsProviderInterface
 
     /**
      * Find the record matching a fabricated key, paging until it is found.
+     *
+     * A key that matches more than one record cannot be resolved to the record
+     * this provider wrote, so callers are told rather than having one of them
+     * picked for them.
      */
     private function findRecordByKey(string $domain, string $type, string $keyName): ?array
     {
+        $matches = $this->findRecordsByKey($domain, $type, $keyName);
+
+        if (count($matches) > 1) {
+            throw new DnsProviderException(
+                "Record key '" . $this->encodeRecordId($type, $keyName) . "' matches " . count($matches)
+                . " {$type} records named '{$keyName}' in zone '{$domain}'. Spaceship has no per-record"
+                . ' identifiers, so the key cannot be resolved to a single record and no change was made.'
+            );
+        }
+
+        return $matches[0] ?? null;
+    }
+
+    /**
+     * Every record in the zone whose type and name match the given key.
+     *
+     * @return array<int, array>
+     */
+    private function findRecordsByKey(string $domain, string $type, string $keyName): array
+    {
+        $matches = [];
         $skip = 0;
 
         while (true) {
             $page = $this->httpGet($this->recordsPath($domain), [
-                'take' => self::PAGE_SIZE,
+                'take' => self::LOOKUP_PAGE_SIZE,
                 'skip' => $skip,
             ]);
 
@@ -542,14 +673,14 @@ class SpaceshipProvider implements DnsProviderInterface
 
             foreach ($items as $record) {
                 if ($this->recordMatchesKey($record, $type, $keyName)) {
-                    return $this->decorateRecord($record);
+                    $matches[] = $this->decorateRecord($record);
                 }
             }
 
             $skip += count($items);
 
             if ($items === [] || $skip >= (int) ($page['total'] ?? $skip)) {
-                return null;
+                return $matches;
             }
         }
     }
