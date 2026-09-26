@@ -21,7 +21,7 @@ class DomainFormRequest extends AdminFormRequest
                 'regex:/^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$/',
                 $domainId ? "unique:domains,name,{$domainId}" : 'unique:domains,name',
             ],
-            'dns_provider' => 'required|string|in:cloudflare,hetzner,route53,dnsimple,bunny,spaceship',
+            'dns_provider' => 'required|string|in:cloudflare,hetzner,route53,bunny,spaceship',
             'dns_config' => 'required|array',
             'dns_config.api_token' => 'required_if:dns_provider,cloudflare,hetzner|string|min:1',
             'dns_config.access_key_id' => 'required_if:dns_provider,route53|string|min:1',
